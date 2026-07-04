@@ -345,11 +345,15 @@ def pcb_markdown(m: dict, summary: bool) -> str:
 
 # ------------------------------------------------------------------ render
 
-def pdf_to_pngs(pdf: Path, out_base: Path, dpi: int, fit_bbox_mm=None) -> list[Path]:
+def pdf_to_pngs(pdf: Path, out_base: Path, dpi: int, fit_bbox_mm=None,
+                bg: str = "white") -> list[Path]:
     """Rasterize. fit_bbox_mm=[xmin,ymin,xmax,ymax] crops to that region —
-    KiCad plots 1:1, so page mm == board file mm (Y from page top)."""
+    KiCad plots 1:1, so page mm == board file mm (Y from page top).
+    bg: background color name or #RRGGBB (plots don't paint their own)."""
     import pypdfium2 as pdfium
+    from PIL import ImageColor
 
+    fill = ImageColor.getrgb(bg) + (255,)
     PT = 72 / 25.4  # points per mm
     doc = pdfium.PdfDocument(str(pdf))
     outs = []
@@ -363,7 +367,7 @@ def pdf_to_pngs(pdf: Path, out_base: Path, dpi: int, fit_bbox_mm=None) -> list[P
                 x0, y0, x1, y1 = (v * PT for v in fit_bbox_mm)
                 # crop = (left, bottom, right, top) amounts to cut off
                 crop = (max(0, x0), max(0, ph - y1), max(0, pw - x1), max(0, y0))
-            img = page.render(scale=dpi / 72, crop=crop).to_pil()
+            img = page.render(scale=dpi / 72, crop=crop, fill_color=fill).to_pil()
             page.close()
             out = out_base if n == 1 else out_base.with_name(
                 f"{out_base.stem}-p{i + 1}{out_base.suffix}")
@@ -393,12 +397,14 @@ def cmd_render(args) -> None:
 
     layers = args.layers or "F.Cu,B.Cu,Edge.Cuts,F.SilkS,B.SilkS"
 
+    theme = ["--theme", args.theme] if args.theme else []
+
     def export_pdf(dest: Path) -> None:
         if kind == "sch":
-            kc.run_cli("sch", "export", "pdf", "--output", str(dest), str(f))
+            kc.run_cli("sch", "export", "pdf", "--output", str(dest), *theme, str(f))
         else:
             kc.run_cli("pcb", "export", "pdf", "--output", str(dest),
-                       "--layers", layers, "--include-border-title", str(f))
+                       "--layers", layers, "--include-border-title", *theme, str(f))
 
     # board bbox auto-fit (boards are tiny on a full plot sheet); --full-page disables
     fit_bbox = None
@@ -412,13 +418,30 @@ def cmd_render(args) -> None:
                 dpi = int(min(4800, max(200, 1400 * 25.4 / (fit_bbox[2] - fit_bbox[0]))))
 
     if want_pdf:
-        export_pdf(out)
-        print(json.dumps({"rendered": [str(out)], "mode": kind, "format": "pdf"}))
+        if fit_bbox:  # vector crop: shrink the page boxes to the board bbox
+            import pypdfium2 as pdfium
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td) / "out.pdf"
+                export_pdf(tmp)
+                PT = 72 / 25.4
+                doc = pdfium.PdfDocument(str(tmp))
+                for page in doc:
+                    _, ph = page.get_size()
+                    x0, y0, x1, y1 = (v * PT for v in fit_bbox)
+                    box = (x0, ph - y1, x1, ph - y0)
+                    page.set_mediabox(*box)
+                    page.set_cropbox(*box)
+                doc.save(str(out))
+                doc.close()
+        else:
+            export_pdf(out)
+        print(json.dumps({"rendered": [str(out)], "mode": kind, "format": "pdf",
+                          **({"fit_mm": fit_bbox} if fit_bbox else {})}))
         return
     with tempfile.TemporaryDirectory() as td:
         pdf = Path(td) / "out.pdf"
         export_pdf(pdf)
-        outs = pdf_to_pngs(pdf, out, dpi, fit_bbox)
+        outs = pdf_to_pngs(pdf, out, dpi, fit_bbox, args.bg)
     print(json.dumps({"rendered": [str(o) for o in outs], "mode": kind, "format": "png",
                       **({"fit_mm": fit_bbox, "dpi": dpi} if fit_bbox else {})}))
 
@@ -450,6 +473,9 @@ def main() -> None:
     r.add_argument("--dpi", type=int, default=200)
     r.add_argument("--full-page", action="store_true",
                    help="pcb 2D: keep the full plot sheet instead of auto-fitting to the board")
+    r.add_argument("--theme", help="KiCad color theme name, passed to kicad-cli (e.g. nf_ai)")
+    r.add_argument("--bg", default="white",
+                   help="PNG background color, e.g. '#001023' (plots don't paint their own)")
     args = ap.parse_args()
 
     if not args.file.exists():
