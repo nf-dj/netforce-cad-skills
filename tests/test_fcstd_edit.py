@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPTS = REPO / ".claude/skills/freecad/scripts"
+SCRIPTS = REPO / "skills/freecad/scripts"
 FIXTURE = REPO / "fixtures/freecad/param_box.FCStd"
 BRACKET = REPO / "tests/build_bracket.py"
 

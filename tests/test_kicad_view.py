@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPTS = REPO / ".claude/skills/kicad/scripts"
+SCRIPTS = REPO / "skills/kicad/scripts"
 PY = REPO / ".venv/bin/python"
 
 SCH_FIXTURES = sorted((REPO / "fixtures/kicad").glob("*/*.kicad_sch")) + sorted(

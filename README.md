@@ -18,13 +18,19 @@ the change, and applies it with targeted edit commands that verify themselves
 
 ## Install
 
-Copy or symlink the skill directories into a project's `.claude/skills/` (or
-`~/.claude/skills/` to enable them everywhere):
+Skills live in the tool-agnostic top-level `skills/` directory — each one is a
+`SKILL.md` (instructions for the agent) plus plain-CLI `scripts/` that work
+with any agent that can run shell commands.
 
-```sh
-ln -s "$(pwd)/.claude/skills/kicad" ~/.claude/skills/kicad
-ln -s "$(pwd)/.claude/skills/freecad" ~/.claude/skills/freecad
-```
+- **Claude Code**: this repo symlinks `.claude/skills -> skills`, so they are
+  active here automatically. For other projects / globally:
+  ```sh
+  ln -s "$(pwd)/skills/kicad" ~/.claude/skills/kicad
+  ln -s "$(pwd)/skills/freecad" ~/.claude/skills/freecad
+  ```
+- **Other agents** (Codex, Gemini CLI, ...): point the agent at
+  `skills/<name>/SKILL.md` as instructions, or symlink into that tool's
+  skill/prompt directory. The scripts have no Claude-specific behavior.
 
 ## Requirements
 
@@ -37,7 +43,7 @@ ln -s "$(pwd)/.claude/skills/freecad" ~/.claude/skills/freecad
 ## Tests
 
 ```sh
-python3 -m venv .venv && .venv/bin/pip install -r .claude/skills/kicad/scripts/requirements.txt
+python3 -m venv .venv && .venv/bin/pip install -r skills/kicad/scripts/requirements.txt
 .venv/bin/python tests/test_kicad_roundtrip.py   # backend fidelity gate
 # FreeCAD fixture regeneration:
 /Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd tests/make_freecad_fixtures.py

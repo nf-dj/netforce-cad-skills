@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / ".claude/skills/freecad/scripts/fcstd_view.py"
+SCRIPT = REPO / "skills/freecad/scripts/fcstd_view.py"
 
 FIXTURES = sorted((REPO / "fixtures/freecad").glob("*.FCStd")) + sorted(
     (REPO / "fixtures/real").glob("*.FCStd"))
@@ -51,7 +51,7 @@ def main() -> int:
 
     # render smoke test (png + pdf, multi-view)
     import tempfile
-    render = REPO / ".claude/skills/freecad/scripts/fcstd_render.py"
+    render = REPO / "skills/freecad/scripts/fcstd_render.py"
     with tempfile.TemporaryDirectory() as td:
         for out in (f"{td}/r.png", f"{td}/r.pdf"):
             r = subprocess.run([sys.executable, str(render),

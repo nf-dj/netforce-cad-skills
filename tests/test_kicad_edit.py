@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPTS = REPO / ".claude/skills/kicad/scripts"
+SCRIPTS = REPO / "skills/kicad/scripts"
 PY = REPO / ".venv/bin/python"
 KICAD_CLI = "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
 FIXTURE = REPO / "fixtures/kicad/Arduino_Pro_Mini"

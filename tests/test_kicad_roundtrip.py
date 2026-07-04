@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / ".claude/skills/kicad/scripts"))
+sys.path.insert(0, str(REPO / "skills/kicad/scripts"))
 
 KICAD_CLI = "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
 
