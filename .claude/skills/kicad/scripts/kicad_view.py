@@ -441,7 +441,8 @@ def cmd_render(args) -> None:
     with tempfile.TemporaryDirectory() as td:
         pdf = Path(td) / "out.pdf"
         export_pdf(pdf)
-        outs = pdf_to_pngs(pdf, out, dpi, fit_bbox, args.bg)
+        bg = args.bg or ("#001023" if kind == "pcb" else "white")
+        outs = pdf_to_pngs(pdf, out, dpi, fit_bbox, bg)
     print(json.dumps({"rendered": [str(o) for o in outs], "mode": kind, "format": "png",
                       **({"fit_mm": fit_bbox, "dpi": dpi} if fit_bbox else {})}))
 
@@ -474,8 +475,9 @@ def main() -> None:
     r.add_argument("--full-page", action="store_true",
                    help="pcb 2D: keep the full plot sheet instead of auto-fitting to the board")
     r.add_argument("--theme", help="KiCad color theme name, passed to kicad-cli (e.g. nf_ai)")
-    r.add_argument("--bg", default="white",
-                   help="PNG background color, e.g. '#001023' (plots don't paint their own)")
+    r.add_argument("--bg", default=None,
+                   help="PNG background color (default: dark '#001023' for boards, "
+                        "white for schematics)")
     args = ap.parse_args()
 
     if not args.file.exists():
