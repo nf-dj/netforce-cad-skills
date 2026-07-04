@@ -377,17 +377,24 @@ def pdf_to_pngs(pdf: Path, out_base: Path, dpi: int, fit_bbox_mm=None) -> list[P
 PCB_BG = (0, 16, 35)  # pcbnew dark canvas
 
 
-def blend_pcb_layers(pdf: Path, dpi: int, fit_bbox_mm, layer_alpha: float):
-    """Rasterize a multipage (one-layer-per-page) PDF and alpha-composite the
-    layers over a dark background, pcbnew-style. Each plot page is drawn on
-    white; un-matte it (recover color + coverage alpha), then 'over'-blend."""
+def strip_zones(pcb: Path, dest: Path) -> None:
+    """Write a copy of the board with all zones removed (used to isolate zone
+    fill pixels so only fills get transparency, like pcbnew)."""
+    from kicad_tools.sexp import parse_file, serialize_sexp
+
+    root = parse_file(str(pcb))
+    for z in list(root.find_children("zone")):
+        root.remove(z)
+    dest.write_text(root.to_string() if hasattr(root, "to_string") else serialize_sexp(root))
+
+
+def _render_pages(pdf: Path, dpi: int, fit_bbox_mm):
+    """Yield each page of a multipage plot as float RGB array [0..1]."""
     import numpy as np
     import pypdfium2 as pdfium
-    from PIL import Image
 
     PT = 72 / 25.4
     doc = pdfium.PdfDocument(str(pdf))
-    canvas = None
     try:
         for i in range(len(doc)):
             page = doc[i]
@@ -396,25 +403,54 @@ def blend_pcb_layers(pdf: Path, dpi: int, fit_bbox_mm, layer_alpha: float):
                 pw, ph = page.get_size()
                 x0, y0, x1, y1 = (v * PT for v in fit_bbox_mm)
                 crop = (max(0, x0), max(0, ph - y1), max(0, pw - x1), max(0, y0))
-            img = np.asarray(page.render(scale=dpi / 72, crop=crop).to_pil()
+            yield np.asarray(page.render(scale=dpi / 72, crop=crop).to_pil()
                              .convert("RGB"), dtype=np.float64) / 255.0
             page.close()
-            if canvas is None:
-                canvas = np.tile(np.array(PCB_BG, dtype=np.float64) / 255.0,
-                                 (img.shape[0], img.shape[1], 1))
-            h = min(canvas.shape[0], img.shape[0])
-            w = min(canvas.shape[1], img.shape[1])
-            img = img[:h, :w]
-            # coverage: how far the pixel is from the white matte
-            a = 1.0 - img.min(axis=2)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                color = np.where(a[..., None] > 1e-3,
-                                 (img - (1.0 - a[..., None])) / a[..., None], 0.0)
-            color = np.clip(color, 0.0, 1.0)
-            A = (a * layer_alpha)[..., None]
-            canvas[:h, :w] = canvas[:h, :w] * (1.0 - A) + color * A
     finally:
         doc.close()
+
+
+def _unmatte(img):
+    """Recover (color, coverage) from a plot drawn on white."""
+    import numpy as np
+
+    a = 1.0 - img.min(axis=2)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        color = np.where(a[..., None] > 1e-3,
+                         (img - (1.0 - a[..., None])) / a[..., None], 0.0)
+    return np.clip(color, 0.0, 1.0), a
+
+
+def blend_pcb_layers(pdf_full: Path, pdf_items: Path, dpi: int, fit_bbox_mm,
+                     zone_alpha: float):
+    """pcbnew-style compositing over the dark canvas: items (tracks, pads,
+    silk) are opaque; only zone FILLS are translucent. pdf_full has all
+    content per layer page; pdf_items is the same plot from a zone-stripped
+    board — the difference in coverage is the zone fill."""
+    import numpy as np
+    from PIL import Image
+
+    canvas = None
+    for full, items in zip(_render_pages(pdf_full, dpi, fit_bbox_mm),
+                           _render_pages(pdf_items, dpi, fit_bbox_mm)):
+        if canvas is None:
+            canvas = np.tile(np.array(PCB_BG, dtype=np.float64) / 255.0,
+                             (full.shape[0], full.shape[1], 1))
+        h = min(canvas.shape[0], full.shape[0], items.shape[0])
+        w = min(canvas.shape[1], full.shape[1], items.shape[1])
+        full, items = full[:h, :w], items[:h, :w]
+        c_full, a_full = _unmatte(full)
+        c_items, a_items = _unmatte(items)
+        # zone fill = coverage present in the full plot but not in the
+        # zone-stripped plot; draw it translucent first
+        a_zone = np.clip(a_full - a_items, 0.0, 1.0)
+        A = (a_zone * zone_alpha)[..., None]
+        canvas[:h, :w] = canvas[:h, :w] * (1.0 - A) + c_full * A
+        # then the items, opaque
+        A = a_items[..., None]
+        canvas[:h, :w] = canvas[:h, :w] * (1.0 - A) + c_items * A
+    if canvas is None:
+        sys.exit("plot produced no pages")
     return Image.fromarray((np.clip(canvas, 0, 1) * 255).astype("uint8"))
 
 
@@ -435,14 +471,12 @@ def cmd_render(args) -> None:
         print(json.dumps({"rendered": [str(out)], "mode": "3d", "side": args.side}))
         return
 
-    layers = args.layers or "F.Cu,B.Cu,Edge.Cuts,F.SilkS,B.SilkS"
+    # composited back-to-front: front layers end up on top, like pcbnew's top view
+    layers = args.layers or "B.SilkS,B.Cu,F.Cu,F.SilkS,Edge.Cuts"
 
-    def export_pdf(dest: Path, multipage: bool) -> None:
+    def export_pdf(dest: Path) -> None:
         if kind == "sch":
             kc.run_cli("sch", "export", "pdf", "--output", str(dest), str(f))
-        elif multipage:
-            kc.run_cli("pcb", "export", "pdf", "--output", str(dest),
-                       "--layers", layers, "--mode-multipage", str(f))
         else:
             kc.run_cli("pcb", "export", "pdf", "--output", str(dest),
                        "--layers", layers, "--include-border-title", str(f))
@@ -461,11 +495,20 @@ def cmd_render(args) -> None:
     blend = kind == "pcb" and not args.opaque
     if blend:
         with tempfile.TemporaryDirectory() as td:
-            export_pdf(Path(td), multipage=True)  # multipage --output is a directory
-            pdfs = list(Path(td).glob("*.pdf"))
-            if not pdfs:
+            td = Path(td)
+            full_dir, items_dir = td / "full", td / "items"
+            full_dir.mkdir(), items_dir.mkdir()
+            stripped = td / f.name
+            strip_zones(f, stripped)
+            kc.run_cli("pcb", "export", "pdf", "--output", str(full_dir),
+                       "--layers", layers, "--mode-multipage", str(f))
+            kc.run_cli("pcb", "export", "pdf", "--output", str(items_dir),
+                       "--layers", layers, "--mode-multipage", str(stripped))
+            pdf_full = next(iter(full_dir.glob("*.pdf")), None)
+            pdf_items = next(iter(items_dir.glob("*.pdf")), None)
+            if not pdf_full or not pdf_items:
                 sys.exit("kicad-cli produced no multipage PDF")
-            img = blend_pcb_layers(pdfs[0], dpi, fit_bbox, args.layer_alpha)
+            img = blend_pcb_layers(pdf_full, pdf_items, dpi, fit_bbox, args.zone_alpha)
         if want_pdf:
             img.save(out, "PDF", resolution=dpi)
         else:
@@ -477,12 +520,12 @@ def cmd_render(args) -> None:
         return
 
     if want_pdf:
-        export_pdf(out, multipage=False)
+        export_pdf(out)
         print(json.dumps({"rendered": [str(out)], "mode": kind, "format": "pdf"}))
         return
     with tempfile.TemporaryDirectory() as td:
         pdf = Path(td) / "out.pdf"
-        export_pdf(pdf, multipage=False)
+        export_pdf(pdf)
         outs = pdf_to_pngs(pdf, out, dpi, fit_bbox)
     print(json.dumps({"rendered": [str(o) for o in outs], "mode": kind, "format": "png",
                       **({"fit_mm": fit_bbox, "dpi": dpi} if fit_bbox else {})}))
@@ -516,10 +559,11 @@ def main() -> None:
     r.add_argument("--full-page", action="store_true",
                    help="pcb 2D: keep the full plot sheet instead of auto-fitting to the board")
     r.add_argument("--opaque", action="store_true",
-                   help="pcb 2D: opaque plot on white (old style) instead of "
-                        "translucent layers on dark background")
-    r.add_argument("--layer-alpha", type=float, default=0.8,
-                   help="pcb 2D blend: per-layer opacity 0..1 (default 0.8)")
+                   help="pcb 2D: plain plot on white instead of pcbnew-style "
+                        "dark background")
+    r.add_argument("--zone-alpha", type=float, default=0.45,
+                   help="pcb 2D: zone FILL opacity 0..1 (default 0.45); "
+                        "tracks/pads/footprints stay opaque")
     args = ap.parse_args()
 
     if not args.file.exists():
