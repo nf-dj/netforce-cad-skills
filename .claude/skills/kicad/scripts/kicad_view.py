@@ -345,16 +345,25 @@ def pcb_markdown(m: dict, summary: bool) -> str:
 
 # ------------------------------------------------------------------ render
 
-def pdf_to_pngs(pdf: Path, out_base: Path, dpi: int) -> list[Path]:
+def pdf_to_pngs(pdf: Path, out_base: Path, dpi: int, fit_bbox_mm=None) -> list[Path]:
+    """Rasterize. fit_bbox_mm=[xmin,ymin,xmax,ymax] crops to that region —
+    KiCad plots 1:1, so page mm == board file mm (Y from page top)."""
     import pypdfium2 as pdfium
 
+    PT = 72 / 25.4  # points per mm
     doc = pdfium.PdfDocument(str(pdf))
     outs = []
     try:
         n = len(doc)
         for i in range(n):
             page = doc[i]
-            img = page.render(scale=dpi / 72).to_pil()
+            crop = (0, 0, 0, 0)
+            if fit_bbox_mm:
+                pw, ph = page.get_size()  # points
+                x0, y0, x1, y1 = (v * PT for v in fit_bbox_mm)
+                # crop = (left, bottom, right, top) amounts to cut off
+                crop = (max(0, x0), max(0, ph - y1), max(0, pw - x1), max(0, y0))
+            img = page.render(scale=dpi / 72, crop=crop).to_pil()
             page.close()
             out = out_base if n == 1 else out_base.with_name(
                 f"{out_base.stem}-p{i + 1}{out_base.suffix}")
@@ -394,11 +403,24 @@ def cmd_render(args) -> None:
         export_pdf(out)
         print(json.dumps({"rendered": [str(out)], "mode": kind, "format": "pdf"}))
         return
+
+    # PNG: for boards, auto-fit to the Edge.Cuts bbox (they are tiny on a full
+    # plot sheet otherwise); --full-page disables.
+    fit_bbox = None
+    dpi = args.dpi
+    if kind == "pcb" and not args.full_page:
+        bbox = edge_cuts_bbox(f)
+        if bbox:
+            m = 3.0  # mm margin
+            fit_bbox = [bbox[0] - m, bbox[1] - m, bbox[2] + m, bbox[3] + m]
+            if args.dpi == 200:  # default: pick dpi so the board spans ~1400 px
+                dpi = int(min(4800, max(200, 1400 * 25.4 / (fit_bbox[2] - fit_bbox[0]))))
     with tempfile.TemporaryDirectory() as td:
         pdf = Path(td) / "out.pdf"
         export_pdf(pdf)
-        outs = pdf_to_pngs(pdf, out, args.dpi)
-    print(json.dumps({"rendered": [str(o) for o in outs], "mode": kind, "format": "png"}))
+        outs = pdf_to_pngs(pdf, out, dpi, fit_bbox)
+    print(json.dumps({"rendered": [str(o) for o in outs], "mode": kind, "format": "png",
+                      **({"fit_mm": fit_bbox, "dpi": dpi} if fit_bbox else {})}))
 
 
 # ------------------------------------------------------------------ main
@@ -426,6 +448,8 @@ def main() -> None:
     r.add_argument("--side", default="top", choices=["top", "bottom", "left", "right", "front", "back"])
     r.add_argument("--layers", help="pcb 2D: comma-separated layer list")
     r.add_argument("--dpi", type=int, default=200)
+    r.add_argument("--full-page", action="store_true",
+                   help="pcb 2D: keep the full plot sheet instead of auto-fitting to the board")
     args = ap.parse_args()
 
     if not args.file.exists():
