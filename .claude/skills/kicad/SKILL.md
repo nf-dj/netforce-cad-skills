@@ -64,7 +64,10 @@ Standalone verification: `scripts/kicad_verify.py roundtrip|erc|netlist-diff`.
 ```sh
 python3 scripts/kicad_view.py render FILE.kicad_sch -o out.png      # schematic image
 python3 scripts/kicad_view.py render FILE.kicad_sch -o out.pdf      # native vector PDF
-python3 scripts/kicad_view.py render FILE.kicad_pcb -o out.png      # 2D layers (--layers to pick)
+python3 scripts/kicad_view.py render FILE.kicad_pcb -o out.png      # 2D layers, translucent on dark
+                                                                    # bg (pcbnew-style); auto-fits to
+                                                                    # board; --layers / --layer-alpha /
+                                                                    # --opaque / --full-page to adjust
 python3 scripts/kicad_view.py render FILE.kicad_pcb --3d -o out.png # raytraced 3D board (--side top|bottom)
 ```
 Multi-sheet schematics produce `out-p1.png`, `out-p2.png`, ... After rendering

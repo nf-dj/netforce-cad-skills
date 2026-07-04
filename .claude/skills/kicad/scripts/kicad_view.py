@@ -374,6 +374,50 @@ def pdf_to_pngs(pdf: Path, out_base: Path, dpi: int, fit_bbox_mm=None) -> list[P
     return outs
 
 
+PCB_BG = (0, 16, 35)  # pcbnew dark canvas
+
+
+def blend_pcb_layers(pdf: Path, dpi: int, fit_bbox_mm, layer_alpha: float):
+    """Rasterize a multipage (one-layer-per-page) PDF and alpha-composite the
+    layers over a dark background, pcbnew-style. Each plot page is drawn on
+    white; un-matte it (recover color + coverage alpha), then 'over'-blend."""
+    import numpy as np
+    import pypdfium2 as pdfium
+    from PIL import Image
+
+    PT = 72 / 25.4
+    doc = pdfium.PdfDocument(str(pdf))
+    canvas = None
+    try:
+        for i in range(len(doc)):
+            page = doc[i]
+            crop = (0, 0, 0, 0)
+            if fit_bbox_mm:
+                pw, ph = page.get_size()
+                x0, y0, x1, y1 = (v * PT for v in fit_bbox_mm)
+                crop = (max(0, x0), max(0, ph - y1), max(0, pw - x1), max(0, y0))
+            img = np.asarray(page.render(scale=dpi / 72, crop=crop).to_pil()
+                             .convert("RGB"), dtype=np.float64) / 255.0
+            page.close()
+            if canvas is None:
+                canvas = np.tile(np.array(PCB_BG, dtype=np.float64) / 255.0,
+                                 (img.shape[0], img.shape[1], 1))
+            h = min(canvas.shape[0], img.shape[0])
+            w = min(canvas.shape[1], img.shape[1])
+            img = img[:h, :w]
+            # coverage: how far the pixel is from the white matte
+            a = 1.0 - img.min(axis=2)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                color = np.where(a[..., None] > 1e-3,
+                                 (img - (1.0 - a[..., None])) / a[..., None], 0.0)
+            color = np.clip(color, 0.0, 1.0)
+            A = (a * layer_alpha)[..., None]
+            canvas[:h, :w] = canvas[:h, :w] * (1.0 - A) + color * A
+    finally:
+        doc.close()
+    return Image.fromarray((np.clip(canvas, 0, 1) * 255).astype("uint8"))
+
+
 def cmd_render(args) -> None:
     import tempfile
 
@@ -391,21 +435,19 @@ def cmd_render(args) -> None:
         print(json.dumps({"rendered": [str(out)], "mode": "3d", "side": args.side}))
         return
 
-    def export_pdf(dest: Path) -> None:
+    layers = args.layers or "F.Cu,B.Cu,Edge.Cuts,F.SilkS,B.SilkS"
+
+    def export_pdf(dest: Path, multipage: bool) -> None:
         if kind == "sch":
             kc.run_cli("sch", "export", "pdf", "--output", str(dest), str(f))
+        elif multipage:
+            kc.run_cli("pcb", "export", "pdf", "--output", str(dest),
+                       "--layers", layers, "--mode-multipage", str(f))
         else:
-            layers = args.layers or "F.Cu,B.Cu,Edge.Cuts,F.SilkS,B.SilkS"
             kc.run_cli("pcb", "export", "pdf", "--output", str(dest),
                        "--layers", layers, "--include-border-title", str(f))
 
-    if want_pdf:
-        export_pdf(out)
-        print(json.dumps({"rendered": [str(out)], "mode": kind, "format": "pdf"}))
-        return
-
-    # PNG: for boards, auto-fit to the Edge.Cuts bbox (they are tiny on a full
-    # plot sheet otherwise); --full-page disables.
+    # board bbox auto-fit (boards are tiny on a full plot sheet); --full-page disables
     fit_bbox = None
     dpi = args.dpi
     if kind == "pcb" and not args.full_page:
@@ -415,9 +457,32 @@ def cmd_render(args) -> None:
             fit_bbox = [bbox[0] - m, bbox[1] - m, bbox[2] + m, bbox[3] + m]
             if args.dpi == 200:  # default: pick dpi so the board spans ~1400 px
                 dpi = int(min(4800, max(200, 1400 * 25.4 / (fit_bbox[2] - fit_bbox[0]))))
+
+    blend = kind == "pcb" and not args.opaque
+    if blend:
+        with tempfile.TemporaryDirectory() as td:
+            export_pdf(Path(td), multipage=True)  # multipage --output is a directory
+            pdfs = list(Path(td).glob("*.pdf"))
+            if not pdfs:
+                sys.exit("kicad-cli produced no multipage PDF")
+            img = blend_pcb_layers(pdfs[0], dpi, fit_bbox, args.layer_alpha)
+        if want_pdf:
+            img.save(out, "PDF", resolution=dpi)
+        else:
+            img.save(out)
+        print(json.dumps({"rendered": [str(out)], "mode": "pcb",
+                          "format": "pdf (raster)" if want_pdf else "png",
+                          "blend": True, "layers": layers,
+                          **({"fit_mm": fit_bbox, "dpi": dpi} if fit_bbox else {})}))
+        return
+
+    if want_pdf:
+        export_pdf(out, multipage=False)
+        print(json.dumps({"rendered": [str(out)], "mode": kind, "format": "pdf"}))
+        return
     with tempfile.TemporaryDirectory() as td:
         pdf = Path(td) / "out.pdf"
-        export_pdf(pdf)
+        export_pdf(pdf, multipage=False)
         outs = pdf_to_pngs(pdf, out, dpi, fit_bbox)
     print(json.dumps({"rendered": [str(o) for o in outs], "mode": kind, "format": "png",
                       **({"fit_mm": fit_bbox, "dpi": dpi} if fit_bbox else {})}))
@@ -450,6 +515,11 @@ def main() -> None:
     r.add_argument("--dpi", type=int, default=200)
     r.add_argument("--full-page", action="store_true",
                    help="pcb 2D: keep the full plot sheet instead of auto-fitting to the board")
+    r.add_argument("--opaque", action="store_true",
+                   help="pcb 2D: opaque plot on white (old style) instead of "
+                        "translucent layers on dark background")
+    r.add_argument("--layer-alpha", type=float, default=0.8,
+                   help="pcb 2D blend: per-layer opacity 0..1 (default 0.8)")
     args = ap.parse_args()
 
     if not args.file.exists():
