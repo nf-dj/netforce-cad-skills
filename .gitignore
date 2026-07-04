@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+*.bak-*
+fixtures/real/
+.claude/settings.local.json
